@@ -89,7 +89,7 @@ def ethernet_command_send_receive(device_provider:EhternetProvider):
         return False
 
     #  get user configuration parameters
-    for i in range(16):
+    for i in range(12):
         command_line = get_user_configuration_parameters(device_provider.communicator.get_dst_mac(), 
                                                          device_provider.communicator.get_src_mac(),
                                                          list(INPUT_PACKETS[1]),
@@ -101,7 +101,7 @@ def ethernet_command_send_receive(device_provider:EhternetProvider):
             return False
       
     # set user configuration
-    for i in range(16):
+    for i in range(12):
         command_line = set_user_configuration(device_provider.communicator.get_dst_mac(), 
                                               device_provider.communicator.get_src_mac(),
                                               list(INPUT_PACKETS[2]),
