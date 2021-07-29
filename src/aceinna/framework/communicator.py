@@ -9,13 +9,15 @@ import threading
 from abc import ABCMeta, abstractmethod
 import serial
 import serial.tools.list_ports
-import psutil
+from scapy.all import sendp, sniff, srp, conf, AsyncSniffer
+from scapy.layers.l2 import Ether
 from ..devices import DeviceManager
-from .constants import BAUDRATE_LIST
+from .constants import (BAUDRATE_LIST, INTERFACES)
 from .context import APP_CONTEXT
-from .utils.resource import (get_executor_path)
-from .wrapper import SocketConnWrapper
+from .utils.resource import get_executor_path
 from .utils.print import (print_red, print_yellow)
+from .utils import helper
+from .wrapper import SocketConnWrapper
 
 
 class CommunicatorFactory:
@@ -27,10 +29,12 @@ class CommunicatorFactory:
         '''
         Initial communicator instance
         '''
-        if method == 'uart':
+        if method == INTERFACES.UART:
             return SerialPort(options)
-        elif method == 'eth':
+        elif method == INTERFACES.ETH:
             return LAN(options)
+        elif method == INTERFACES.ETH_100BASE_T1:
+            return Ethernet(options)
         else:
             raise Exception('no matched communicator')
 
@@ -117,7 +121,7 @@ class SerialPort(Communicator):
 
     def __init__(self, options=None):
         super(SerialPort, self).__init__()
-        self.type = 'uart'
+        self.type = INTERFACES.UART
         self.serial_port = None  # the active UART
         self.port = None
         self.baud = None
@@ -561,7 +565,7 @@ class LAN(Communicator):
 
     def __init__(self, options=None):
         super().__init__()
-        self.type = 'eth'
+        self.type = INTERFACES.ETH
         self.host = None
         self.port = 2203  # TODO: predefined or configured?
 
@@ -712,3 +716,147 @@ class LAN(Communicator):
         reset buffer
         '''
         pass
+
+
+class Ethernet(Communicator):
+    '''Ethernet'''
+
+    def __init__(self, options=None):
+        super().__init__()
+        self.type = INTERFACES.ETH_100BASE_T1
+        self.src_mac = None
+        self.dst_mac = 'FF:FF:FF:FF:FF:FF'
+        self.ethernet_name = None
+        self.data = None
+        self.iface = None
+
+        self.filter_device_type = None
+        self.filter_device_type_assigned = False
+
+        self.iface_confirmed = False
+
+        if options and options.device_type != 'auto':
+            self.filter_device_type = options.device_type
+            self.filter_device_type_assigned = True
+
+    def handle_receive_packet(self, packet):
+        self.iface_confirmed = True
+        self.dst_mac = packet.src
+
+    def confirm_iface(self, iface):
+        pG = [0x01, 0xcc]
+        filter_exp = 'ether dst host ' + \
+            iface[1] + ' and ether[16:2] == 0x01cc'
+        src_mac = bytes([int(x, 16) for x in iface[1].split(':')])
+        command_line = helper.build_ethernet_packet(
+            self.get_dst_mac(), src_mac, pG)
+        async_sniffer = AsyncSniffer(
+            iface=iface[0], prn=self.handle_receive_packet, filter=filter_exp)
+        async_sniffer.start()
+        sendp(command_line, iface=iface[0], verbose=0)
+        time.sleep(1)
+        async_sniffer.stop()
+
+        if self.iface_confirmed:
+            self.iface = iface[0]
+            self.src_mac = iface[1]
+            print('[NetworkCard]', self.iface)
+
+    def find_device(self, callback, retries=0, not_found_handler=None):
+        self.device = None
+        self.iface_confirmed = False
+
+        # find network connection
+        ifaces_list = self.get_network_card()
+        for i in range(len(ifaces_list)):
+            self.confirm_iface(ifaces_list[i])
+            if self.iface_confirmed:
+                break
+            else:
+                if i == len(ifaces_list) - 1:
+                    print('No available Ethernet card was found.')
+                    return None
+
+        # confirm device
+        time.sleep(1)
+        self.confirm_device(self)
+        if self.device:
+            callback(self.device)
+
+    def open(self):
+        '''
+        open
+        '''
+
+    def close(self):
+        '''
+        close
+        '''
+
+    def can_write(self):
+        if self.iface:
+            return True
+        return False
+
+    def write(self, data, is_flush=False):
+        '''
+        write
+        '''
+        try:
+            sendp(data, iface=self.iface, verbose=0)
+            # print(data)
+        except Exception as e:
+            raise
+
+    def read(self, callback=None):
+        '''
+        read
+        '''
+        filter_exp = 'ether src host ' + self.dst_mac
+        sniff(prn=callback, count=0, iface=self.iface, filter=filter_exp)
+
+    def handle_receive_read_result(self, packet):
+        self.read_result = bytes(packet)
+
+    def write_read(self, data, filter_cmd_type=0):
+        if filter_cmd_type:
+            filter_exp = 'ether dst host ' + self.src_mac + \
+                ' and ether[16:2] == %d' % filter_cmd_type
+        else:
+            filter_exp = 'ether dst host ' + self.src_mac
+
+        self.read_result = None
+        async_sniffer = AsyncSniffer(
+            iface=self.iface, prn=self.handle_receive_read_result, filter=filter_exp)
+        async_sniffer.start()
+
+        sendp(data, iface=self.iface, verbose=0)
+
+        time.sleep(2)
+        async_sniffer.stop()
+
+        if self.read_result:
+            return self.read_result
+
+        return None
+
+    def reset_buffer(self):
+        '''
+        reset buffer
+        '''
+        pass
+
+    def get_src_mac(self):
+        return bytes([int(x, 16) for x in self.src_mac.split(':')])
+
+    def get_dst_mac(self):
+        return bytes([int(x, 16) for x in self.dst_mac.split(':')])
+
+    def get_network_card(self):
+        network_card_info = []
+        for item in conf.ifaces:
+            if conf.ifaces[item].ip == '127.0.0.1' or conf.ifaces[item].mac == '':
+                continue
+            network_card_info.append(
+                (conf.ifaces[item].name, conf.ifaces[item].mac))
+        return network_card_info
