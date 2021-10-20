@@ -98,7 +98,12 @@ class Provider(OpenDeviceBase):
         self._build_device_info(device_info)
         self._build_app_info(app_info)
         self.connected = True
-
+        try:
+            str_split = device_info.split()
+            str_split.pop(3)
+            device_info = ' '.join(str_split)
+        except Exception as e:
+            print(e)
         self._device_info_string = '# Connected {0} with LAN #\n\rDevice: {1} \n\rFirmware: {2}'\
             .format('OpenRTK', device_info, app_info)
 
@@ -266,7 +271,7 @@ class Provider(OpenDeviceBase):
             self.properties, self.communicator, self.rtcm_logf)
         self.lan_rtcm_data_logger.run()
 
-    def on_receive_output_packet(self, packet_type, data, error=None):
+    def on_receive_output_packet(self, packet_type, data, *args, **kwargs):
         '''
         Listener for getting output packet
         '''
