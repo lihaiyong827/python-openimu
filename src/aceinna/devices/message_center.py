@@ -4,6 +4,8 @@ import uuid
 import threading
 import datetime
 import time
+
+from aceinna.framework.context import APP_CONTEXT
 from .base import EventBase
 from ..framework.utils import helper
 from ..framework.constants import INTERFACES
@@ -140,10 +142,10 @@ class DeviceMessageCenter(EventBase):
             self._has_running_checker = True
 
         # setup receiver, parser
-        if self._communicator.type == INTERFACES.ETH_100BASE_T1:
-            funcs = [self.thread_ethernet_receiver, self.thread_parser]
-        else:
-            funcs = [self.thread_receiver, self.thread_parser]
+        # if self._communicator.type == INTERFACES.ETH_100BASE_T1:
+        #     funcs = [self.thread_ethernet_receiver, self.thread_parser]
+        # else:
+        funcs = [self.thread_receiver, self.thread_parser]
 
         for func in funcs:
             thread = threading.Thread(target=func)
@@ -213,45 +215,17 @@ class DeviceMessageCenter(EventBase):
             except KeyboardInterrupt:  # response for KeyboardInterrupt such as Ctrl+C
                 return True
 
-    def ethernet_callback(self, packet):
-        data = bytes(packet)
-        if data and len(data) > 0:
-            # print(data)
-            self.emit(EVENT_TYPE.READ_BLOCK, data)
-            self.data_lock.acquire()
-            for data_byte in data:
-                self.data_queue.put(data_byte)
-            self.data_lock.release()
-
-    def thread_ethernet_receiver(self, *args, **kwargs):
-        ''' receive data and push data into data_queue.
-            return when occur Exception or set as stop
-        '''
-        while True:
-            if self._has_exception or self._is_stop:
-                print('thread_receiver: exception')
-                return
-
-            if self._is_pause:
-                continue
-
-            data = None
-            try:
-                self._communicator.read(self.ethernet_callback)
-            except Exception as ex:  # pylint: disable=broad-except
-                print('Thread:receiver error:', ex)
-                self.exception_lock.acquire()
-                self._has_exception = True  # Notice thread paser to exit.
-                self.exception_lock.release()
-                return  # exit thread receiver
-
     def thread_receiver(self, *args, **kwargs):
         ''' receive data and push data into data_queue.
             return when occur Exception or set as stop
         '''
         while True:
-            if self._has_exception or self._is_stop:
-                print('thread_receiver: exception')
+            if self._has_exception:
+                APP_CONTEXT.get_logger().error('Thread receiver exit with exception')
+                return
+
+            if self._is_stop:
+                APP_CONTEXT.get_logger().error('Thread receiver stopped')
                 return
 
             if self._is_pause:
@@ -272,8 +246,7 @@ class DeviceMessageCenter(EventBase):
             if data and len(data) > 0:
                 self.emit(EVENT_TYPE.READ_BLOCK, data)
                 self.data_lock.acquire()
-                for data_byte in data:
-                    self.data_queue.put(data_byte)
+                self.data_queue.put(data)
                 self.data_lock.release()
             else:
                 time.sleep(0.01)

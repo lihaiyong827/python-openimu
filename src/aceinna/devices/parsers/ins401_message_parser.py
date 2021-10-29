@@ -10,67 +10,70 @@ from .ins401_packet_parser import (
 
 MSG_HEADER = [0x55, 0x55]
 PACKET_TYPE_INDEX = 2
-# PRIVATE_PACKET_TYPE = ['RE', 'WE', 'UE', 'LE', 'SR']
-INPUT_PACKETS = [b'\x01\xcc', b'\x02\xcc',
-                 b'\x03\xcc', b'\x04\xcc', b'\x01\x0b', b'\x02\x0b']
-OTHER_OUTPUT_PACKETS = [b'\x02\n', b'\x03\n', b'\x05\n', b'\x06\n']
+PAYLOAD_LEN_INDEX = 8
+INPUT_PACKETS = [
+    b'\x01\xcc',  # Get device information
+    b'\x02\xcc',  # Get parameter
+    b'\x03\xcc',  # Set parameter
+    b'\x04\xcc',  # Save config
+    b'\x01\x0b',  # Send odometer
+    b'\x02\x0b'  # Send NMEA
+]
+OUTPUT_PACKETS = [
+    b'\x01\n',  # IMU 100hz 30 3000
+    b'\x02\n',  # GNSS 1hz 77 77
+    b'\x03\n',  # INS 100hz 108 10800
+    b'\x04\n',  # Odometer 20hz 500
+    b'\x05\n',  # diagnostic 1hz 31 31
+    b'\x06\n'  # RTCM Rover 3000
+]
 
 
 class EthernetMessageParser(MessageParserBase):
     def __init__(self, configuration):
         super(EthernetMessageParser, self).__init__(configuration)
-        self.frame = []
-        self.payload_len_idx = 8
-        self.sync_pattern = collections.deque(2*[0], 2)
-        self.find_header = False
-        self.payload_len = 0
-        # command,continuous_message
 
     def set_run_command(self, command):
         pass
 
-    def analyse(self, data_block):
-        if self.find_header:
-            self.frame.append(data_block)
+    def analyse(self, data):
+        sync_pattern = data[0:2]
+        if operator.eq(list(sync_pattern), MSG_HEADER) and len(data) >= PAYLOAD_LEN_INDEX:
+            payload_len_byte = bytes(data[4:PAYLOAD_LEN_INDEX])
+            payload_len = struct.unpack('<I', payload_len_byte)[0]
 
-            if self.payload_len_idx == len(self.frame):
-                payload_len_byte = bytes(self.frame[4:])
-                self.payload_len = struct.unpack('<I', payload_len_byte)[0]
+            packet_type_byte = bytes(data[PACKET_TYPE_INDEX:4])
+            packet_type = struct.unpack('>H', packet_type_byte)[0]
 
-            elif 8 + self.payload_len + 2 == len(self.frame):
-                packet_type_byte = bytes(self.frame[PACKET_TYPE_INDEX:4])
-                packet_type = struct.unpack('>H', packet_type_byte)[0]
-                self.find_header = False
-                result = helper.calc_crc(self.frame[2:-2])
-                if result[0] == self.frame[-2] and result[1] == self.frame[-1]:
-                    # find a whole frame
-                    # self._parse_frame(self.frame, self.payload_len)
-                    self._parse_message(
-                        struct.pack('>H', packet_type), self.payload_len, self.frame)
+            if len(data) < PAYLOAD_LEN_INDEX + payload_len + 2:
+                APP_CONTEXT.get_logger().logger.info(
+                    "crc check error! packet_type:{0}".format(packet_type))
 
-                    self.find_header = False
-                    self.payload_len = 0
-                    self.sync_pattern = collections.deque(2*[0], 2)
-                else:
-                    APP_CONTEXT.get_logger().logger.info(
-                        "crc check error! packet_type:{0}".format(packet_type))
+                self.emit('crc_failure', packet_type=packet_type,
+                            event_time=time.time())
+                print('crc_failure', packet_type=packet_type,
+                            event_time=time.time())
+                return
 
-                    self.emit('crc_failure', packet_type=packet_type,
-                              event_time=time.time())
-                    input_packet_config = next(
-                        (x for x in self.properties['userMessages']['inputPackets']
-                         if x['name'] == packet_type), None)
-                    if input_packet_config:
-                        self.emit('command',
-                                  packet_type=packet_type,
-                                  data=[],
-                                  error=True,
-                                  raw=self.frame)
-        else:
-            self.sync_pattern.append(data_block)
-            if operator.eq(list(self.sync_pattern), MSG_HEADER):
-                self.frame = MSG_HEADER[:]  # header_tp.copy()
-                self.find_header = True
+            result = helper.calc_crc(data[2:PAYLOAD_LEN_INDEX+payload_len])
+
+            if result[0] == data[PAYLOAD_LEN_INDEX + payload_len] and result[1] == data[PAYLOAD_LEN_INDEX + payload_len + 1]:
+                self._parse_message(packet_type_byte, payload_len, data)
+            else:
+                APP_CONTEXT.get_logger().logger.info(
+                    "crc check error! packet_type:{0}".format(packet_type))
+
+                self.emit('crc_failure', packet_type=packet_type,
+                            event_time=time.time())
+                input_packet_config = next(
+                    (x for x in self.properties['userMessages']['inputPackets']
+                        if x['name'] == packet_type), None)
+                if input_packet_config:
+                    self.emit('command',
+                                packet_type=packet_type,
+                                data=[],
+                                error=True,
+                                raw=data)
 
     def _parse_message(self, packet_type, payload_len, frame):
         payload = frame[self.payload_len_idx:payload_len+self.payload_len_idx]
@@ -100,31 +103,12 @@ class EthernetMessageParser(MessageParserBase):
 
     def _parse_output_packet(self, packet_type, payload, frame):
         # check if it is the valid out packet
-        payload_parser = None
-        is_other_output_packet = OTHER_OUTPUT_PACKETS.__contains__(packet_type)
-        if is_other_output_packet:
-            payload_parser = other_output_parser
-            data = payload_parser(payload)
+        is_output_packet = OUTPUT_PACKETS.__contains__(packet_type)
+        if is_output_packet:
 
             self.emit('continuous_message',
                       packet_type=packet_type,
-                      data=frame,
-                      event_time=time.time())
+                      data=payload,
+                      event_time=time.time(),
+                      raw=frame)
             return
-
-        payload_parser = common_continuous_parser
-
-        output_packet_config = next(
-            (x for x in self.properties['userMessages']['outputPackets']
-                if x['name'] == packet_type), None)
-        data = payload_parser(payload, output_packet_config)
-
-        if not data:
-            # APP_CONTEXT.get_logger().logger.info(
-            #     'Cannot parse packet type {0}. It may caused by firmware upgrade'.format(packet_type))
-            return
-
-        self.emit('continuous_message',
-                  packet_type=packet_type,
-                  data=data,
-                  event_time=time.time())
